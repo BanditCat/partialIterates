@@ -1,0 +1,706 @@
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <meta charset="utf-8">
+    <title>Zoomable Mandelbrot with Orbit and Julia Set</title>
+    <style>
+    body {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        margin: 0;
+        padding: 0;
+        background: #000000;
+        color: #ffffff;
+        font-family: 'Arial', 'Helvetica', sans-serif;
+    }
+h1 {
+    margin-top: 1rem;
+    font-weight: 400;
+}
+    .canvas-container {
+        display: flex;
+        flex-direction: row;
+        gap: 1rem;
+        margin-top: 1rem;
+    }
+canvas {
+    border: 1px solid #333333;
+}
+#pointDisplay {
+    margin-top: 1rem;
+    font-size: 1rem;
+    color: #ffffff;
+}
+
+@media (max-width: 1240px) {
+    .canvas-container {
+        flex-direction: column;
+        align-items: center;
+    }
+    
+    canvas {
+        width: 100%;
+        max-width: 600px; /* Maintain original maximum width */
+        height: auto; /* Maintain aspect ratio */
+    }
+}
+</style>
+    </head>
+    <body>
+    <h1>Zoomable Mandelbrot with Full Continuous Orbit</h1>
+    <div class="canvas-container">
+    <canvas id="mandelbrotCanvas" width="600" height="450"></canvas>
+    <canvas id="orbitCanvas" width="600" height="450"></canvas>
+    </div>
+    <div id="pointDisplay">Click a point on the Mandelbrot set to see its orbit and Julia set</div>
+
+    <script>
+    // --------------------------- Mandelbrot Setup ---------------------------
+let mandelXMin = -2.5;
+let mandelXMax = 1.5;
+let mandelYMin = -1.5;
+let mandelYMax = 1.5;
+
+const maxIter = 100;
+const maxPeriod = 10;
+
+const mandelbrotCanvas = document.getElementById('mandelbrotCanvas');
+const mandelbrotCtx = mandelbrotCanvas.getContext('2d');
+const mandelWidth = mandelbrotCanvas.width;
+const mandelHeight = mandelbrotCanvas.height;
+
+// ---------------------------- Orbit and Julia Setup -------------------------------
+const orbitCanvas = document.getElementById('orbitCanvas');
+const orbitCtx = orbitCanvas.getContext('2d');
+const orbitWidth = orbitCanvas.width;
+const orbitHeight = orbitCanvas.height;
+
+let currentOrbitPoints = [];
+let currentOrbitLines = [];
+let currentAttractingPoints = [];
+let currentC = { cx: 0, cy: 0 }; // Store the clicked point (c) for Julia set
+
+let juliaXMin = -2;
+let juliaXMax = 2;
+let juliaYMin = -2;
+let juliaYMax = 2;
+
+const pointDisplay = document.getElementById('pointDisplay');
+
+// ---------------------------- Helper Functions -------------------------------
+function pixelToMandelComplex(px, py) {
+    const cx = mandelXMin + (px / mandelWidth) * (mandelXMax - mandelXMin);
+    const cy = mandelYMin + (py / mandelHeight) * (mandelYMax - mandelYMin);
+    return { cx, cy };
+}
+
+function pixelToJuliaComplex(px, py) {
+    const cx = juliaXMin + (px / orbitWidth) * (juliaXMax - juliaXMin);
+    const cy = juliaYMin + (py / orbitHeight) * (juliaYMax - juliaYMin);
+    return { cx, cy };
+}
+
+
+// --------------------------- Polynomials --------------------------------
+// Complex number operations
+function complexAdd(a, b) {
+    return { r: a.r + b.r, i: a.i + b.i };
+}
+function complexSubtract(a, b) {
+    return { r: a.r - b.r, i: a.i - b.i };
+}
+function complexPow(a, b) {
+    return complexExp(complexMultiply(b, complexLog( a )));
+}
+function complexMultiply(a, b) {
+    return { r: a.r * b.r - a.i * b.i, i: a.r * b.i + a.i * b.r };
+}
+function complexDivide(a, b) {
+    const denom = b.r * b.r + b.i * b.i;
+    if (denom === 0) {
+        throw new Error("Division by zero.");
+    }
+    return {
+        r: (a.r * b.r + a.i * b.i) / denom,
+        i: (a.i * b.r - a.r * b.i) / denom
+    };
+}
+function complexModulus(a) {
+    return Math.sqrt(a.r*a.r + a.i*a.i);
+}
+function complexDistance(a, b) {
+    return Math.sqrt((a.r - b.r)*(a.r - b.r) + (a.i - b.i)*(a.i - b.i));
+}
+
+// Helper: Create a zero complex number
+function complexZero() {
+    return { r: 0, i: 0 };
+}
+
+// Polynomial with complex support
+class ComplexPolynomial {
+    constructor(coefficients) {
+        this.coefficients = coefficients; // Array of { r, i }
+    }
+
+    // Evaluate polynomial at z
+    evaluate(z) {
+        let result = complexZero();
+        for (let i = this.coefficients.length - 1; i >= 0; i--) {
+            result = complexAdd(complexMultiply(result, z), this.coefficients[i]);
+        }
+        return result;
+    }
+    logEvaluate(logZ) {
+        const terms = this.coefficients.map((coeff, k) => {
+            const logCoeff = complexLog(coeff);
+            const kLogZ = { r: logZ.r * k, i: logZ.i * k };
+            return complexAdd(kLogZ, logCoeff);
+        });
+
+        let logSum = terms[0];
+        for (let i = 1; i < terms.length; i++) {
+	    if( complexModulus(this.coefficients[ i ]) != 0.0 )
+		logSum = complexAddLogStable(terms[i], logSum);
+        }
+        return logSum;
+    }
+    koenigs(alpha, deriv, max_iter = 100) {
+	const poly = this;
+	const lambda = deriv.evaluate(alpha);
+	let z = complexZero();
+	// Initial value for iter = 0: s_0 = (0 - alpha) / (lambda ^ 0) = -alpha
+	let s_prev = complexSubtract(z, alpha);
+    
+	// Initialize previous difference
+	let delta_prev = null;
+	let optimal_iter = 1;
+	// Iterate from 1 up to max_iter
+	for (let iter = 1; iter <= max_iter; iter++) {
+            z = poly.evaluate(z);
+            const lambda_pow = complexPow(lambda, {r: iter, i: 0});
+            const numer = complexSubtract(z, alpha);
+            const s_iter = complexDivide(numer, lambda_pow);
+            const delta = complexModulus(complexSubtract(s_iter, s_prev));
+
+            if (iter >= 2 && delta > delta_prev && delta < 0.0001) {
+		break;
+            }
+	    optimal_iter = iter;
+            s_prev = s_iter;
+            delta_prev = delta;
+	}
+
+	z = complexZero();
+	for (let j = 0; j < optimal_iter; j++) {
+            z = poly.evaluate(z);
+	}
+
+	const lambda_pow = complexPow(lambda, {r: optimal_iter, i: 0});
+        const numer = complexSubtract(z, alpha);
+        const s_iter = complexDivide(numer, lambda_pow);
+	const ret = { r: s_prev.r, i: s_prev.i, iter: optimal_iter }
+	
+	return ret;
+    }
+    inverseKoenigs(warg, alphaarg, deriv, max_iter = 100) {
+	const iter = warg.iter;
+	const lambda = deriv.evaluate( alphaarg );
+	const lambda_pow = complexPow(lambda, {r: iter, i: 0});
+	const numer = complexMultiply( warg, lambda_pow );
+	let z = complexAdd(numer, alphaarg);
+	for (let j = 0; j < iter; j++) {
+            z = this.inverseEvaluate(z);
+	}
+	return z;
+    }
+    partialIterate(deriv, iter) {
+	let alpha = complexZero();
+	for(let i = 0; i < maxIter * 10; ++i )
+	    alpha = this.evaluate( alpha );
+	const lambda = deriv.evaluate( alpha );
+	const lambda_pow = complexPow( lambda, iter );
+	const k = this.koenigs( alpha, deriv );
+	let lk = complexMultiply( k, lambda_pow );
+	lk.iter = k.iter;
+	return this.inverseKoenigs(lk, alpha, deriv);
+    }
+    inverseEvaluate(w, z0={ r:w.r, i:w.i }, tolerance = 1e-15, maxIterations = 100) {
+	const polyDeriv = this.derivative(); // Compute the derivative polynomial once
+	let z = { r: z0.r, i: z0.i }; // Clone initial guess to avoid modifying it
+	
+	for (let iter = 0; iter < maxIterations; iter++) {
+            const fz = this.evaluate(z); // poly(z)
+            const fprimez = polyDeriv.evaluate(z); // poly'(z)
+            
+            // Check convergence: |poly(z) - w| < tolerance
+            const error = complexModulus(complexSubtract(fz, w));
+            if (error < tolerance) {
+		return z; // Solution found
+            }
+	    
+            // Check if derivative is too small to proceed
+            if (complexModulus(fprimez) < 1e-10) {
+		console.warn("Derivative too small, stopping iteration");
+		return z; // Return best guess so far
+            }
+	    
+            // Newton-Raphson step: delta = (poly(z) - w) / poly'(z)
+            const delta = complexDivide(complexSubtract(fz, w), fprimez);
+            z = complexSubtract(z, delta); // Update z: z = z - delta
+	}
+	
+	// If max iterations reached, return the last z
+	return z;
+    }
+    inverseLogEvaluate(wl, zl0={ r:wl.r, i:wl.i }, tolerance = 1e-10, maxIterations = 100) {
+	const polyDeriv = this.derivative(); // Compute the derivative polynomial once
+	const w = complexExp( wl );
+	let zl = { r: zl0.r, i: zl0.i }; // Clone initial guess to avoid modifying it
+	
+	for (let iter = 0; iter < maxIterations; iter++) {
+            const fzl = this.logEvaluate(zl); // poly(z)
+            const fprimezl = polyDeriv.logEvaluate(zl); // poly'(z)
+            
+            // Check convergence: |poly(z) - w| < tolerance
+            const error = complexModulus(complexSubtract(complexExp(fzl), w));
+            if (error < tolerance) {
+		return zl; // Solution found
+            }
+	    
+            // Check if derivative is too small to proceed
+            if (fprimezl.r < -1000 ) {
+		console.warn("Derivative too small, stopping iteration");
+		return zl; // Return best guess so far
+            }
+	    
+            // Newton-Raphson step: delta = (poly(z) - w) / poly'(z)
+            const delta = complexSubtract(complexSubLogStable(fzl, wl), fprimezl);
+            zl = complexSubLogStable(zl, delta); // Update z: z = z - delta
+	}
+	
+	// If max iterations reached, return the last z
+	return zl;
+    }
+
+    // Multiply two polynomials
+    multiply(other) {
+        const resultDegree = this.coefficients.length - 1 + other.coefficients.length - 1;
+        const result = Array(resultDegree + 1).fill().map(() => complexZero());
+
+        for (let i = 0; i < this.coefficients.length; i++) {
+            for (let j = 0; j < other.coefficients.length; j++) {
+                const term = complexMultiply(this.coefficients[i], other.coefficients[j]);
+                result[i + j] = complexAdd(result[i + j], term);
+            }
+        }
+        return new ComplexPolynomial(result);
+    }
+
+    // Compute this polynomial composed with another: f(g(x))
+    compose(g) {
+        let result = new ComplexPolynomial([complexZero()]); // Start with constant 0
+        let gPower = new ComplexPolynomial([{ r: 1, i: 0 }]); // g^0 = 1
+
+        for (let i = 0; i < this.coefficients.length; i++) {
+            // Compute a_i * g(x)^i
+            const term = gPower.multiply(new ComplexPolynomial([this.coefficients[i]]));
+            result = result.add(term);
+
+            // Update gPower to next power: g^(i+1)
+            gPower = gPower.multiply(g);
+        }
+        return result;
+    }
+
+    // Add two polynomials
+    add(other) {
+        const maxLength = Math.max(this.coefficients.length, other.coefficients.length);
+        const result = Array(maxLength).fill().map(() => complexZero());
+
+        for (let i = 0; i < maxLength; i++) {
+            const a = i < this.coefficients.length ? this.coefficients[i] : complexZero();
+            const b = i < other.coefficients.length ? other.coefficients[i] : complexZero();
+            result[i] = complexAdd(a, b);
+        }
+        return new ComplexPolynomial(result);
+    }
+
+    // Calculus
+    derivative() {
+        // If degree is 0, derivative is 0
+        if (this.coefficients.length <= 1) {
+            return new ComplexPolynomial([{ r: 0, i: 0 }]);
+        }
+        // Compute derivative coefficients
+        const derivCoeffs = this.coefficients.slice(1).map((coeff, i) => {
+            const factor = i + 1; // i+1 because we sliced off the constant term
+            return { r: coeff.r * factor, i: coeff.i * factor };
+        });
+        return new ComplexPolynomial(derivCoeffs);
+    }
+    
+    // For debugging: String representation
+    toString() {
+        return this.coefficients
+            .map((c, i) => {
+                if (c.r === 0 && c.i === 0) return '';
+                const real = c.r !== 0 ? `${c.r.toFixed(2)}` : '';
+                const imag = c.i !== 0 ? (c.i > 0 && c.r !== 0 ? ` + ${c.i.toFixed(2)}i` : `${c.i.toFixed(2)}i`) : '';
+                return `${real}${imag}${i > 0 ? `z^${i}` : ''}`;
+            })
+            .filter(term => term !== '')
+            .join(' + ')
+            .replace(/\+ -/g, '- ');
+    }
+}
+
+// Example usage
+// f(x) = z^2 + (1 + i)
+// const f = new ComplexPolynomial([
+//     { r: 1, i: 1 },  // constant
+//     { r: 0, i: 0 },  // z
+//     { r: 1, i: 0 }   // z^2
+// ]);
+
+// // g(x) = z + 1
+// const g = new ComplexPolynomial([
+//     { r: 1, i: 0 },  // constant
+//     { r: 1, i: 0 }   // z
+// ]);
+
+// Compute f(g(z)) = (z + 1)^2 + (1 + i)
+//const fg = f.compose(g);
+
+// Test it
+//const z = { r: 2, i: 1 };
+//console.log("f(z) =", f.evaluate(z));
+//console.log("g(z) =", g.evaluate(z));
+//console.log("f(g(z)) =", fg.evaluate(z));
+//console.log("Polynomial f(g(z)) =", fg.toString());
+
+
+// ---------------------------- Mandelbrot -------------------------------
+function drawMandelbrot() {
+    const imgData = mandelbrotCtx.createImageData(mandelWidth, mandelHeight);
+
+    for (let py = 0; py < mandelHeight; py++) {
+        const y0 = mandelYMin + (py / mandelHeight) * (mandelYMax - mandelYMin);
+        for (let px = 0; px < mandelWidth; px++) {
+            const x0 = mandelXMin + (px / mandelWidth) * (mandelXMax - mandelXMin);
+            let x = 0;
+            let y = 0;
+            let iteration = 0;
+
+            while (x * x + y * y <= 4 && iteration < maxIter) {
+                const xTemp = x * x - y * y + x0;
+                y = 2 * x * y + y0;
+                x = xTemp;
+                iteration++;
+            }
+
+            const colorVal = iteration === maxIter ? 0 : iteration * 2;
+            const index = (px + py * mandelWidth) * 4;
+            imgData.data[index + 0] = 0;         // Red
+            imgData.data[index + 1] = colorVal;  // Green
+            imgData.data[index + 2] = 0;         // Blue
+            imgData.data[index + 3] = 255;       // Alpha
+        }
+    }
+    mandelbrotCtx.putImageData(imgData, 0, 0);
+}
+
+// ------------------------------ Julia Set -------------------------------
+function drawJuliaSet(cx, cy) {
+    const imgData = orbitCtx.createImageData(orbitWidth, orbitHeight);
+    const c = { r: cx, i: cy };
+
+    for (let py = 0; py < orbitHeight; py++) {
+        const y0 = juliaYMin + (py / orbitHeight) * (juliaYMax - juliaYMin);
+        for (let px = 0; px < orbitWidth; px++) {
+            const x0 = juliaXMin + (px / orbitWidth) * (juliaXMax - juliaXMin);
+            let x = x0;
+            let y = y0;
+            let iteration = 0;
+
+            while (x * x + y * y <= 4 && iteration < maxIter) {
+                const xTemp = x * x - y * y + c.r;
+                y = 2 * x * y + c.i;
+                x = xTemp;
+                iteration++;
+            }
+
+            const colorVal = iteration === maxIter ? 0 : iteration * 2;
+            const index = (px + py * orbitWidth) * 4;
+            imgData.data[index + 0] = colorVal;  // Red
+            imgData.data[index + 1] = 0;         // Green
+            imgData.data[index + 2] = 0;         // Blue
+            imgData.data[index + 3] = 255;       // Alpha
+        }
+    }
+    orbitCtx.putImageData(imgData, 0, 0);
+}
+
+// ------------------------------ Orbit ---------------------------------
+function complexLog(z) {
+    const { r, i } = z;
+    const modulus = Math.sqrt(r * r + i * i);
+    const angle = Math.atan2(i, r);
+    return { r: Math.log(modulus), i: angle };
+}
+
+function complexExp(z) {
+    const { r, i } = z;
+    const length = Math.exp(r);
+    return { r: Math.cos(i) * length, i: Math.sin(i) * length };
+}
+
+function complexAddLogStable(a, b) {
+    let diff = { r: b.r - a.r, i: b.i - a.i };
+    const expDiff = complexExp(diff);
+    const sumTerm = { r: 1 + expDiff.r, i: expDiff.i };
+    const stableTerm = complexLog(sumTerm);
+    return { r: a.r + stableTerm.r, i: a.i + stableTerm.i };
+}
+
+function complexSubLogStable(a, b) {
+    return complexAddLogStable(a, {r:b.r, i:b.i-Math.PI});
+}
+
+function mand(x, c) {
+    const { r, i } = x;
+    const { r: rc, i: ic } = c;
+    return { r: (r * r - i * i) + rc, i: 2 * r * i + ic };
+}
+
+
+function findAttractingPoints(c) {
+    let x = { r: 0, i: 0 };
+    const orbit = [];
+    for(let i = 0; i < maxIter * 100; ++i) {
+	x = mand( x, c );
+    }
+    for(let i = 0; i < maxIter; ++i) {
+	x = mand( x, c );
+	orbit.push( { r:x.r, i:x.i } );
+    }
+    let cycleLength = 0;
+    let epsilon = 1000;
+    const top = orbit[ orbit.length - 1];
+    for(let i = 2; i <= maxIter; ++i) {
+	const newEpsilon = complexDistance( top, orbit[ orbit.length - i ] );
+	if( newEpsilon < 0.00000000000001 ){
+	    cycleLength = i - 1;
+	    break;
+	}	    
+	if( newEpsilon < epsilon ) {
+	    epsilon = newEpsilon;
+	    cycleLength = i - 1;
+	}
+    }
+    return orbit.slice(-cycleLength);    
+}
+
+function buildPolynomial(c) {
+    const g = new ComplexPolynomial([
+	{ r: c.r, i: c.i },  // constant
+	{ r: 0, i: 0 },  // 0
+	{ r: 1, i: 0 }   // z^2
+    ]);
+    let f = new ComplexPolynomial([
+	{ r: 0, i: 0 },  // constant
+	{ r: 1, i: 0 },  // z
+    ]);
+    const len = findAttractingPoints(c).length;
+    for(let i = 0;i < len;++i) {
+	f = f.compose(g);
+    }
+    return f;
+}
+
+function logMand(x, c) {
+    const { r, i } = x;
+    const twox = { r: 2 * r, i: 2 * i };
+    return complexAddLogStable(twox, c);
+}
+
+function invlogMand(x, c) {
+    const minusc = { r: c.r, i: c.i - Math.PI };
+    const xmc = complexAddLogStable(x, minusc);
+    return { r: xmc.r / 2, i: xmc.i / 2 };
+}
+
+function logBoetchers(x, c, iter) {
+    let z = { r: x.r, i: x.i };
+    for (let i = 0; i < iter; ++i)
+        z = logMand(z, c);
+    const exp2 = Math.pow(2, iter);
+    return { r: z.r / exp2, i: z.i / exp2 };
+}
+
+function invlogBoetchers(x, c, iter) {
+    const exp2 = Math.pow(2, iter);
+    let z = { r: x.r * exp2, i: x.i * exp2 };
+    for (let i = 0; i < iter; ++i) {
+        z = invlogMand(z, c);
+    }
+    return z;
+}
+
+function showOrbit(cx, cy) {
+    currentC = { cx, cy }; // Store the clicked point for Julia set
+    const c = { r: cx, i: cy };
+    const cl = complexLog(c);
+    let z = c;
+    const orbitPoints = [{ x: 0, y: 0 }];
+    const orbitLines = [];
+
+    let expand = false;
+    let expandIters = 0;   
+    for (let iter = 0; iter < maxIter; iter++) {
+        orbitPoints.push({ x: z.r, y: z.i });
+        z = mand(z, c);
+        if (z.r * z.r + z.i * z.i > 4) {
+            expand = true;
+            expandIters = iter + 1;
+            break;
+        }
+    }
+    orbitPoints.push({ x: z.r, y: z.i });
+
+    if (expand) {
+        const maxIters = expandIters;
+        const sco = logBoetchers(cl, cl, expandIters + 40);
+        for(let lambda = 1/2; lambda < 2 ** maxIters; lambda += (2 ** maxIters - 1) / 40000) {
+            const scou = { r: sco.r * lambda, i: sco.i * lambda };
+            let z_log = invlogBoetchers(scou, cl, expandIters + 40);
+            const z = complexExp(z_log);
+            orbitLines.push({ x: z.r, y: z.i });
+        }
+	currentAttractingPoints = [];
+	pointDisplay.textContent = `Selected point: (${cx.toFixed(4)}+${cy.toFixed(4)}i)`;
+    }else{
+	currentAttractingPoints = findAttractingPoints(c);
+	if( currentAttractingPoints.length <= maxPeriod ){
+	    const poly = buildPolynomial(c);
+	    const poly2 = poly.derivative();
+
+	    for(let iter = 0; iter <= 20; iter += 20 / 4000){
+		const cp3 = poly.partialIterate(poly2,{r:iter,i:0});
+		orbitLines.push({x: cp3.r, y: cp3.i});
+	    }
+		
+	    pointDisplay.textContent = `Selected point: (${cx.toFixed(4)}+${cy.toFixed(4)}i) period:${currentAttractingPoints.length}`;
+	}
+	    
+    }
+    currentOrbitPoints = orbitPoints;
+    currentOrbitLines = orbitLines;
+    drawOrbitAndJulia();
+    
+    // Update point display
+}
+
+function drawOrbitAndJulia() {
+    // Clear the canvas
+    orbitCtx.clearRect(0, 0, orbitWidth, orbitHeight);
+
+    // Draw Julia set as background
+    drawJuliaSet(currentC.cx, currentC.cy);
+
+    // Draw orbit lines
+    if (currentOrbitLines.length > 1) {
+        for (let i = 0; i < currentOrbitLines.length - 1; i++) {
+            const startPoint = currentOrbitLines[i];
+            const endPoint = currentOrbitLines[i + 1];
+            const startX = (startPoint.x - juliaXMin) / (juliaXMax - juliaXMin) * orbitWidth;
+            const startY = (startPoint.y - juliaYMin) / (juliaYMax - juliaYMin) * orbitHeight;
+            const endX = (endPoint.x - juliaXMin) / (juliaXMax - juliaXMin) * orbitWidth;
+            const endY = (endPoint.y - juliaYMin) / (juliaYMax - juliaYMin) * orbitHeight;
+
+            const t = i / (currentOrbitLines.length - 1);
+            const red = 255 - Math.round(255 * t);
+            const green = 255 - Math.round(128 * t);
+            const blue = 255 - Math.round(128 * t);
+
+            orbitCtx.strokeStyle = `rgb(${red}, ${green}, ${blue})`;
+            orbitCtx.beginPath();
+            orbitCtx.moveTo(startX, startY);
+            orbitCtx.lineTo(endX, endY);
+            orbitCtx.stroke();
+        }
+    }
+
+    // Draw orbit points
+    orbitCtx.fillStyle = 'blue';
+    for (let i = 0; i < currentOrbitPoints.length; i++) {
+        const { x, y } = currentOrbitPoints[i];
+        const screenX = (x - juliaXMin) / (juliaXMax - juliaXMin) * orbitWidth;
+        const screenY = (y - juliaYMin) / (juliaYMax - juliaYMin) * orbitHeight;
+
+        orbitCtx.beginPath();
+        orbitCtx.arc(screenX, screenY, 3, 0, 2 * Math.PI);
+        orbitCtx.fill();
+    }
+
+    // Draw attracting points
+    orbitCtx.fillStyle = 'purple';
+    for (let iter = 0; iter < currentAttractingPoints.length; iter++) {
+        const { r, i } = currentAttractingPoints[iter];
+        const screenX = (r - juliaXMin) / (juliaXMax - juliaXMin) * orbitWidth;
+        const screenY = (i - juliaYMin) / (juliaYMax - juliaYMin) * orbitHeight;
+
+        orbitCtx.beginPath();
+        orbitCtx.arc(screenX, screenY, 3, 0, 2 * Math.PI);
+        orbitCtx.fill();
+    }
+}
+
+// ------------------------------ Events --------------------------------
+mandelbrotCanvas.addEventListener('click', (e) => {
+    const rect = mandelbrotCanvas.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+
+    const { cx, cy } = pixelToMandelComplex(px, py);
+    showOrbit(cx, cy);
+});
+
+mandelbrotCanvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const rect = mandelbrotCanvas.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    const { cx: anchorX, cy: anchorY } = pixelToMandelComplex(px, py);
+
+    const factor = e.deltaY < 0 ? 0.9 : 1.1;
+    mandelXMin = anchorX + (mandelXMin - anchorX) * factor;
+    mandelXMax = anchorX + (mandelXMax - anchorX) * factor;
+    mandelYMin = anchorY + (mandelYMin - anchorY) * factor;
+    mandelYMax = anchorY + (mandelYMax - anchorY) * factor;
+
+    drawMandelbrot();
+});
+
+orbitCanvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const rect = orbitCanvas.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    const { cx: anchorX, cy: anchorY } = pixelToJuliaComplex(px, py);
+
+    const factor = e.deltaY < 0 ? 0.9 : 1.1;
+    juliaXMin = anchorX + (juliaXMin - anchorX) * factor;
+    juliaXMax = anchorX + (juliaXMax - anchorX) * factor;
+    juliaYMin = anchorY + (juliaYMin - anchorY) * factor;
+    juliaYMax = anchorY + (juliaYMax - anchorY) * factor;
+
+    drawOrbitAndJulia();
+});
+
+// -------------------------- Initial Draw -------------------------------
+drawMandelbrot();
+</script>
+    </body>
+    </html>
